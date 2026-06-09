@@ -11,6 +11,7 @@ Released on TBD (UTC).
 ### Fixes
 
 ### Internal Improvements
+- Migrated rollover interest calculation to the Rust `RolloverInterestCalculator` exposed via PyO3 (Rust)
 
 ### Documentation Updates
 

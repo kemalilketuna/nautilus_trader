@@ -15,9 +15,14 @@
 
 //! Python bindings for simulation module types.
 
+use chrono::NaiveDate;
+use nautilus_core::python::to_pyruntime_err;
+use nautilus_model::identifiers::InstrumentId;
 use pyo3::prelude::*;
 
-use crate::modules::fx_rollover::{FXRolloverInterestModule, InterestRateRecord};
+use crate::modules::fx_rollover::{
+    FXRolloverInterestModule, InterestRateRecord, RolloverInterestCalculator,
+};
 
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
 #[pymethods]
@@ -48,6 +53,31 @@ impl FXRolloverInterestModule {
     #[new]
     fn py_new(records: Vec<InterestRateRecord>) -> Self {
         Self::new(records)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+}
+
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+#[pymethods]
+impl RolloverInterestCalculator {
+    /// Calculates overnight rollover interest rates for FX currency pairs.
+    #[new]
+    fn py_new(records: Vec<InterestRateRecord>) -> Self {
+        Self::new(records)
+    }
+
+    /// Returns the overnight rollover interest rate for the instrument on the given date.
+    #[pyo3(name = "calc_overnight_rate")]
+    fn py_calc_overnight_rate(
+        &self,
+        instrument_id: InstrumentId,
+        date: NaiveDate,
+    ) -> PyResult<f64> {
+        self.calc_overnight_rate(instrument_id, date)
+            .map_err(to_pyruntime_err)
     }
 
     fn __repr__(&self) -> String {

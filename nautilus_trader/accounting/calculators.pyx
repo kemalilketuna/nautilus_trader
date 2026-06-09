@@ -13,32 +13,34 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from datetime import date as pydate
 from decimal import Decimal
-from itertools import permutations
 
 import pandas as pd
 
+from nautilus_trader.core import nautilus_pyo3
+
+from cpython.datetime cimport date
+
 from nautilus_trader.core.correctness cimport Condition
-from nautilus_trader.core.rust.model cimport PriceType
-from nautilus_trader.model.functions cimport price_type_to_str
 from nautilus_trader.model.identifiers cimport InstrumentId
-from nautilus_trader.model.objects cimport Currency
 
 
 cdef class RolloverInterestCalculator:
     """
     Provides rollover interest rate calculations.
 
-    If rate_data_csv_path is empty then will default to the included short-term
-    interest rate data csv (data since 1956).
+    The underlying rate computation is delegated to the Rust implementation
+    exposed through PyO3.
 
     Parameters
     ----------
-    data : str
+    data : pd.DataFrame
         The short term interest rate data.
     """
 
     def __init__(self, data not None: pd.DataFrame):
+        # Group the source data by currency for the legacy `get_rate_data` accessor
         self._rate_data = {
             "AUD": data.loc[data["LOCATION"] == "AUS"],
             "CAD": data.loc[data["LOCATION"] == "CAN"],
@@ -56,13 +58,20 @@ cdef class RolloverInterestCalculator:
             "ZAR": data.loc[data["LOCATION"] == "ZAF"],
         }
 
+        # The Rust calculator owns the location-to-currency mapping, so forward every record
+        cdef list records = [
+            nautilus_pyo3.InterestRateRecord(str(row.LOCATION), str(row.TIME), float(row.Value))
+            for row in data.itertuples()
+        ]
+        self._calculator = nautilus_pyo3.RolloverInterestCalculator(records)
+
     cpdef object get_rate_data(self):
         """
-        Return the short-term interest rate dataframe.
+        Return the short-term interest rate data grouped by currency.
 
         Returns
         -------
-        pd.DataFrame
+        dict[str, pd.DataFrame]
 
         """
         return self._rate_data
@@ -86,6 +95,8 @@ cdef class RolloverInterestCalculator:
         ------
         ValueError
             If `instrument_id.symbol` length is not in range [6, 7].
+        RuntimeError
+            If no rate data exists for the instrument on the given date.
 
         Notes
         -----
@@ -93,28 +104,13 @@ cdef class RolloverInterestCalculator:
 
         """
         Condition.not_none(instrument_id, "instrument_id")
-        Condition.not_none(date, "timestamp")
+        Condition.not_none(date, "date")
         Condition.in_range_int(len(instrument_id.symbol.value), 6, 7, "len(instrument_id)")
 
-        cdef str symbol = instrument_id.symbol.value
-        cdef str base_currency = symbol[:3]
-        cdef str quote_currency = symbol[-3:]
-        cdef str time_monthly = f"{date.year}-{str(date.month).zfill(2)}"
-        cdef str time_quarter = f"{date.year}-Q{str(int(((date.month - 1) // 3) + 1)).zfill(2)}"
-
-        base_data = self._rate_data[base_currency].loc[self._rate_data[base_currency]['TIME'] == time_monthly]
-        if base_data.empty:
-            base_data = self._rate_data[base_currency].loc[self._rate_data[base_currency]['TIME'] == time_quarter]
-
-        quote_data = self._rate_data[quote_currency].loc[self._rate_data[quote_currency]['TIME'] == time_monthly]
-        if quote_data.empty:
-            quote_data = self._rate_data[quote_currency].loc[self._rate_data[quote_currency]['TIME'] == time_quarter]
-
-        if base_data.empty and quote_data.empty:
-            raise RuntimeError(f"cannot find rollover interest rate for {instrument_id} on {date}")  # pragma: no cover
-
-        # Extract scalar values to avoid FutureWarning from casting single-element Series
-        cdef double base_val = <double>base_data['Value'].iloc[0]
-        cdef double quote_val = <double>quote_data['Value'].iloc[0]
-        cdef double rate = ((base_val - quote_val) / 365.0) / 100.0
+        # Normalize any date-like input (e.g. `pd.Timestamp`) to a plain date for PyO3
+        cdef object pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(instrument_id.value)
+        cdef object rate = self._calculator.calc_overnight_rate(
+            pyo3_instrument_id,
+            pydate(date.year, date.month, date.day),
+        )
         return Decimal(rate)
